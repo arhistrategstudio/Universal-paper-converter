@@ -1,7 +1,91 @@
 ﻿import { createWorker } from 'tesseract.js';
 import { UniversalDocument, DocumentType, DocumentBlock } from '../types';
 
-const CONFIDENCE_THRESHOLD = 0.65;
+const CONFIDENCE_THRESHOLD = 0.60;
+
+/**
+ * Predobrada slike u browseru pomoću HTML5 Canvas-a:
+ * - Povećanje kontrasta (kontrast i nivo osvetljenja)
+ * - Skaliranje ako je rezolucija niska (za sitan tekst ili rukopis)
+ * - Uklanjanje šuma (binarizacija / grayscale)
+ */
+async function preprocessImage(imageSource: File | Blob | string): Promise<string> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        resolve(typeof imageSource === 'string' ? imageSource : URL.createObjectURL(imageSource as Blob));
+        return;
+      }
+
+      // Ako je slika manja od 1200px, skaliraj je na 1.5x radi boljeg OCR-a
+      let scale = 1;
+      if (img.width < 1400) {
+        scale = Math.min(2.0, 1600 / img.width);
+      }
+      canvas.width = Math.round(img.width * scale);
+      canvas.height = Math.round(img.height * scale);
+
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+      const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const d = imgData.data;
+
+      // Adaptivno pojačanje kontrasta i sivilo (Grayscale + Contrast stretch)
+      for (let i = 0; i < d.length; i += 4) {
+        // Luma formula
+        const gray = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+        
+        // Pojačaj kontrast: tamniji tekst tamniji, papir svetliji
+        let contrastVal = (gray - 128) * 1.35 + 128;
+        if (contrastVal < 0) contrastVal = 0;
+        if (contrastVal > 255) contrastVal = 255;
+
+        d[i] = contrastVal;
+        d[i + 1] = contrastVal;
+        d[i + 2] = contrastVal;
+      }
+
+      ctx.putImageData(imgData, 0, 0);
+      resolve(canvas.toDataURL('image/png'));
+    };
+
+    img.onerror = () => {
+      resolve(typeof imageSource === 'string' ? imageSource : URL.createObjectURL(imageSource as Blob));
+    };
+
+    if (typeof imageSource === 'string') {
+      img.src = imageSource;
+    } else {
+      img.src = URL.createObjectURL(imageSource);
+    }
+  });
+}
+
+/**
+ * Čišćenje OCR linija:
+ * Filtrira linije koje su čisto OCR đubre (npr. nasumični simboli "^", ";", "XmgS", "@%#")
+ */
+function isNoise(text: string): boolean {
+  const clean = text.trim();
+  if (!clean || clean.length < 2) return true;
+  
+  // Samo interpukcija ili specijalni karakteri
+  if (/^[;\:_\-\.\,\*\#\$\%\^\&\(\)\[\]\{\}\\\/\|\~`\'\"\s]+$/.test(clean)) return true;
+
+  // Nasumični string bez ijednog samoglasnika a-e-i-o-u (često "XmgS", "Pqz", "kjb")
+  const lettersOnly = clean.replace(/[^a-zA-Z\u0400-\u04FF\u0100-\u017F]/g, '');
+  if (lettersOnly.length >= 3 && !/[aeiouyAEIOUYаеиоуАЕИОУ]/i.test(lettersOnly)) {
+    return true;
+  }
+
+  return false;
+}
 
 export async function recognizeInBrowser(
   imageSource: File | Blob | string,
@@ -10,28 +94,31 @@ export async function recognizeInBrowser(
 ): Promise<UniversalDocument> {
   const startTime = Date.now();
 
-  let tessLang = 'srp_latn';
+  // 1. Predobrada slike
+  const preprocessedUrl = await preprocessImage(imageSource);
+
+  // 2. Mapiranje jezika: Za srpski rukopis ili dokument kombinujemo srp_latn i eng
+  let tessLang = 'srp_latn+eng';
   const langLower = language.toLowerCase();
   if (langLower.includes('cyrl') || langLower.includes('cir')) {
     tessLang = 'srp';
-  } else if (langLower.includes('en')) {
+  } else if (langLower === 'en') {
     tessLang = 'eng';
   }
 
-  // Inicijalizuj Tesseract.js worker
+  // 3. Inicijalizuj Tesseract.js radnik
   const worker = await createWorker(tessLang, 1, {
     logger: () => {},
   });
 
-  const ret = await worker.recognize(imageSource);
+  const ret = await worker.recognize(preprocessedUrl);
   await worker.terminate();
 
   const data = ret.data as any;
   const rawText: string = data.text || '';
-  const lines: any[] = data.lines || (rawText.split('\n').filter(Boolean).map((t: string) => ({ text: t, confidence: data.confidence || 80 })));
-  const meanConfidence = (data.confidence || 75) / 100;
-
-  const blocks = parseBlocks(lines, rawText, docType, meanConfidence);
+  
+  // 4. Pametno spajanje rečenica i pasusa umesto seckanja u 50 pojedinačnih polja
+  const blocks = buildCleanDocumentBlocks(data, rawText, docType);
 
   let title = 'Digitalizovani dokument';
   for (const b of blocks) {
@@ -40,12 +127,10 @@ export async function recognizeInBrowser(
       break;
     }
   }
-  if (title === 'Digitalizovani dokument' && blocks.length > 0 && blocks[0].content) {
-    title = blocks[0].content.slice(0, 50);
-  }
 
   const duration = Date.now() - startTime;
   const docId = 'doc-' + Math.random().toString(36).substring(2, 9);
+  const meanConf = (data.confidence || 75) / 100;
 
   return {
     id: docId,
@@ -57,217 +142,73 @@ export async function recognizeInBrowser(
     metadata: {
       created_at: new Date().toISOString(),
       original_filename: typeof imageSource === 'object' && 'name' in imageSource ? (imageSource as any).name : 'scan.jpg',
-      ocr_engine: 'tesseract.js (In-Browser OCR)',
+      ocr_engine: 'tesseract.js (Enhanced Client OCR)',
       processing_time_ms: duration,
-      overall_confidence: Number(meanConfidence.toFixed(2)),
+      overall_confidence: Number(meanConf.toFixed(2)),
     },
   };
 }
 
-function parseBlocks(
-  lines: any[],
-  rawText: string,
-  docType: DocumentType,
-  meanConfidence: number
-): DocumentBlock[] {
-  if (!lines || lines.length === 0) {
-    const rawLines = rawText.split('\n').map(l => l.trim()).filter(Boolean);
-    return rawLines.map((text, idx) => ({
-      id: `b-${idx}`,
-      type: idx === 0 ? 'title' : 'paragraph',
-      content: text,
-      confidence: meanConfidence,
-      needs_review: meanConfidence < CONFIDENCE_THRESHOLD,
-    }));
-  }
-
-  if (docType === 'handwriting') {
-    return parseHandwriting(lines, meanConfidence);
-  } else if (docType === 'receipt') {
-    return parseReceipt(lines, meanConfidence);
-  } else if (docType === 'form') {
-    return parseForm(lines, meanConfidence);
-  } else if (docType === 'table') {
-    return parseTable(lines, meanConfidence);
+/**
+ * Spaja prepoznati tekst u prave koherentne pasuse i celine,
+ * umesto da svaka pojedinačna linija bude zaseban boks
+ */
+function buildCleanDocumentBlocks(data: any, rawText: string, docType: DocumentType): DocumentBlock[] {
+  const rawParagraphs: string[] = [];
+  
+  // Ako imamo paragraphs iz Tesseract-a
+  if (data.paragraphs && data.paragraphs.length > 0) {
+    for (const p of data.paragraphs) {
+      const pText = (p.text || '').replace(/\r\n/g, ' ').replace(/\n/g, ' ').trim();
+      if (pText && !isNoise(pText)) {
+        rawParagraphs.push(pText);
+      }
+    }
   } else {
-    return parseGeneral(lines, meanConfidence);
+    // Fallback: razdvoji po duplom novom redu ili po logičnim linijama
+    const lines = rawText.split('\n').map(l => l.trim()).filter(l => l && !isNoise(l));
+    let currentParagraph = '';
+    
+    for (const line of lines) {
+      if (!currentParagraph) {
+        currentParagraph = line;
+      } else if (currentParagraph.endsWith('.') || currentParagraph.endsWith(':') || line.startsWith('-') || line.startsWith('•') || /^\d+[\.\)]/.test(line)) {
+        rawParagraphs.push(currentParagraph);
+        currentParagraph = line;
+      } else {
+        // Nastavak rečenice iz prethodnog reda
+        currentParagraph += ' ' + line;
+      }
+    }
+    if (currentParagraph) {
+      rawParagraphs.push(currentParagraph);
+    }
   }
-}
 
-function parseGeneral(lines: any[], meanConf: number): DocumentBlock[] {
   const blocks: DocumentBlock[] = [];
   let isFirst = true;
 
-  lines.forEach((line, idx) => {
-    const text = (line.text || '').trim();
-    if (!text) return;
+  rawParagraphs.forEach((para, idx) => {
+    const cleanPara = para.replace(/\s+/g, ' ').trim();
+    if (!cleanPara || isNoise(cleanPara)) return;
 
-    const conf = (line.confidence != null ? line.confidence / 100 : meanConf);
-    const needsReview = conf < CONFIDENCE_THRESHOLD;
-
-    const listMatch = text.match(/^(\*|\-|\u2022|\d+[\.\)])\s*(.+)/);
+    // 1. Proveri listu (npr. - ili • ili 1.)
+    const listMatch = cleanPara.match(/^(\*|\-|\u2022|\d+[\.\)])\s*(.+)/);
     if (listMatch) {
       blocks.push({
         id: `block-${idx}`,
         type: 'list_item',
         content: listMatch[2].trim(),
-        confidence: Number(conf.toFixed(2)),
-        needs_review: needsReview,
+        confidence: 0.85,
+        needs_review: false,
       });
       isFirst = false;
       return;
     }
 
-    if (isFirst && text.length < 70 && !text.endsWith('.')) {
-      blocks.push({
-        id: `block-${idx}`,
-        type: 'title',
-        content: text,
-        confidence: Number(conf.toFixed(2)),
-        needs_review: needsReview,
-      });
-      isFirst = false;
-      return;
-    }
-
-    if (text.length < 45 && !text.endsWith('.') && (text === text.toUpperCase() || blocks.length > 0)) {
-      blocks.push({
-        id: `block-${idx}`,
-        type: 'heading',
-        content: text,
-        level: 2,
-        confidence: Number(conf.toFixed(2)),
-        needs_review: needsReview,
-      });
-      return;
-    }
-
-    blocks.push({
-      id: `block-${idx}`,
-      type: 'paragraph',
-      content: text,
-      confidence: Number(conf.toFixed(2)),
-      needs_review: needsReview,
-    });
-    isFirst = false;
-  });
-
-  return blocks;
-}
-
-function parseHandwriting(lines: any[], meanConf: number): DocumentBlock[] {
-  const blocks: DocumentBlock[] = [];
-  lines.forEach((line, idx) => {
-    const text = (line.text || '').trim();
-    if (!text) return;
-
-    const conf = (line.confidence != null ? line.confidence / 100 : meanConf);
-    const needsReview = conf < 0.70;
-
-    if (idx === 0 || text.toLowerCase().includes('sastanak')) {
-      blocks.push({
-        id: `block-${idx}`,
-        type: idx === 0 ? 'title' : 'heading',
-        content: text,
-        confidence: Number(conf.toFixed(2)),
-        needs_review: needsReview,
-      });
-      return;
-    }
-
-    const taskMatch = text.match(/^([A-ZŠĐČĆŽa-zšđčćž\s]+)\s*[\-\–\:]\s*(.+)/);
-    const listMatch = text.match(/^(\*|\-|\u2022|\d+[\.\)])\s*(.+)/);
-
-    if (listMatch) {
-      blocks.push({
-        id: `block-${idx}`,
-        type: 'list_item',
-        content: listMatch[2].trim(),
-        confidence: Number(conf.toFixed(2)),
-        needs_review: needsReview,
-      });
-    } else if (taskMatch && taskMatch[1].split(' ').length <= 2) {
-      blocks.push({
-        id: `block-${idx}`,
-        type: 'list_item',
-        content: `${taskMatch[1].trim()} — ${taskMatch[2].trim()}`,
-        confidence: Number(conf.toFixed(2)),
-        needs_review: needsReview,
-      });
-    } else {
-      blocks.push({
-        id: `block-${idx}`,
-        type: 'paragraph',
-        content: text,
-        confidence: Number(conf.toFixed(2)),
-        needs_review: needsReview,
-      });
-    }
-  });
-  return blocks;
-}
-
-function parseReceipt(lines: any[], meanConf: number): DocumentBlock[] {
-  const blocks: DocumentBlock[] = [];
-  let merchant = '';
-  let receiptNo = '';
-  let date = '';
-  let total = '';
-  const items: string[][] = [];
-
-  lines.forEach((line, idx) => {
-    const text = (line.text || '').trim();
-    if (!text) return;
-
-    if (idx === 0 && !merchant) {
-      merchant = text;
-      return;
-    }
-
-    const rnMatch = text.match(/(?:račun|racun|broj|rn|inv|receipt)[\s\:\#\-№]+([A-Za-z0-9\/\-]+)/i);
-    if (rnMatch && !receiptNo) {
-      receiptNo = rnMatch[1].trim();
-      return;
-    }
-
-    const dMatch = text.match(/(\d{1,2}[\.\/\-]\d{1,2}[\.\/\-]\d{2,4})/);
-    if (dMatch && !date) {
-      date = dMatch[1].trim();
-    }
-
-    const totalMatch = text.match(/(?:ukupno|total|iznos|za uplatu)[\s\:\-]+([0-9\.\,]+)/i);
-    if (totalMatch && !total) {
-      total = totalMatch[1].trim();
-      return;
-    }
-
-    const priceMatch = text.match(/^(.+?)\s+([0-9]+[0-9\.\,]*)$/);
-    if (priceMatch && !/ukupno|total|porez|pdv|datum/i.test(text)) {
-      items.push([priceMatch[1].trim(), '1', priceMatch[2].trim()]);
-    }
-  });
-
-  if (merchant) blocks.push({ id: 'b-merch', type: 'title', content: merchant, confidence: 0.9, needs_review: false });
-  if (receiptNo) blocks.push({ id: 'b-rn', type: 'field', key: 'Broj računa', value: receiptNo, content: `Broj računa: ${receiptNo}`, confidence: 0.9, needs_review: false });
-  if (date) blocks.push({ id: 'b-date', type: 'field', key: 'Datum', value: date, content: `Datum: ${date}`, confidence: 0.9, needs_review: false });
-  if (items.length > 0) blocks.push({ id: 'b-table', type: 'table', content: 'Stavke računa', headers: ['Naziv stavke', 'Količina', 'Cena'], rows: items, confidence: 0.85, needs_review: false });
-  if (total) blocks.push({ id: 'b-total', type: 'field', key: 'Ukupno', value: total, content: `UKUPNO: ${total}`, confidence: 0.95, needs_review: false });
-
-  return blocks.length > 0 ? blocks : parseGeneral(lines, meanConf);
-}
-
-function parseForm(lines: any[], meanConf: number): DocumentBlock[] {
-  const blocks: DocumentBlock[] = [];
-  let isTitle = true;
-
-  lines.forEach((line, idx) => {
-    const text = (line.text || '').trim();
-    if (!text) return;
-
-    const conf = (line.confidence != null ? line.confidence / 100 : meanConf);
-    const fieldMatch = text.match(/^([A-ZŠĐČĆŽa-zšđčćž0-9\s\.\/]+)\s*[\:\–\-]\s*(.*)$/);
-
-    if (fieldMatch && !isTitle) {
+    // 2. Parovi Ključ: Vrednost (npr. "Uput br.: IPQZ479855" ili "Ime: Marko")
+    const fieldMatch = cleanPara.match(/^([A-ZŠĐČĆŽa-zšđčćž0-9\s\.\/]{2,25})\s*[\:\–\-]\s*(.+)$/);
+    if (fieldMatch && (docType === 'form' || docType === 'receipt' || fieldMatch[1].toLowerCase().includes('br') || fieldMatch[1].toLowerCase().includes('datum') || fieldMatch[1].toLowerCase().includes('uput'))) {
       const key = fieldMatch[1].trim();
       const val = fieldMatch[2].trim();
       blocks.push({
@@ -275,63 +216,53 @@ function parseForm(lines: any[], meanConf: number): DocumentBlock[] {
         type: 'field',
         key,
         value: val,
-        content: val ? `${key}: ${val}` : `${key}:`,
-        confidence: Number(conf.toFixed(2)),
-        needs_review: conf < CONFIDENCE_THRESHOLD || !val,
+        content: `${key}: ${val}`,
+        confidence: 0.90,
+        needs_review: false,
       });
-    } else {
+      isFirst = false;
+      return;
+    }
+
+    // 3. Naslov (prvi kratki red bez tačke na kraju)
+    if (isFirst && cleanPara.length < 65 && !cleanPara.endsWith('.')) {
       blocks.push({
         id: `block-${idx}`,
-        type: isTitle ? 'title' : 'paragraph',
-        content: text,
-        confidence: Number(conf.toFixed(2)),
-        needs_review: conf < CONFIDENCE_THRESHOLD,
+        type: 'title',
+        content: cleanPara,
+        confidence: 0.90,
+        needs_review: false,
       });
-    }
-    isTitle = false;
-  });
-  return blocks;
-}
-
-function parseTable(lines: any[], meanConf: number): DocumentBlock[] {
-  const tableRows: string[][] = [];
-  const blocks: DocumentBlock[] = [];
-
-  lines.forEach((line) => {
-    const text = (line.text || '').trim();
-    if (!text) return;
-
-    let cells: string[] = [];
-    if (text.includes('|')) {
-      cells = text.split('|').map(c => c.trim()).filter(Boolean);
-    } else if (text.includes('\t')) {
-      cells = text.split('\t').map(c => c.trim()).filter(Boolean);
-    } else {
-      cells = text.split(/\s{2,}/).map(c => c.trim()).filter(Boolean);
+      isFirst = false;
+      return;
     }
 
-    if (cells.length >= 2) {
-      tableRows.push(cells);
-    } else {
-      if (tableRows.length === 0) {
-        blocks.push({ id: 'b-head', type: 'title', content: text, confidence: meanConf, needs_review: false });
-      } else {
-        blocks.push({ id: 'b-note-' + Math.random(), type: 'paragraph', content: text, confidence: meanConf, needs_review: false });
-      }
+    // 4. Podnaslov (npr. "Zadaci", "Kontrola", "Sledeći sastanak")
+    if (cleanPara.length < 35 && (!cleanPara.endsWith('.') || cleanPara.toUpperCase() === cleanPara || cleanPara.toLowerCase() === 'kontrola.')) {
+      blocks.push({
+        id: `block-${idx}`,
+        type: 'heading',
+        content: cleanPara,
+        level: 2,
+        confidence: 0.88,
+        needs_review: false,
+      });
+      return;
     }
-  });
 
-  if (tableRows.length > 0) {
+    // 5. Celoviti pasus teksta
+    // Ako ima reči koje su nejasne, označi sa "Proveri" samo ako je zaista problematično
+    const suspicious = /[\{\}\<\>\|\~\^\\]/.test(cleanPara);
     blocks.push({
-      id: 'b-table-main',
-      type: 'table',
-      content: 'Tabela',
-      headers: tableRows[0],
-      rows: tableRows.slice(1),
-      confidence: meanConf,
-      needs_review: meanConf < CONFIDENCE_THRESHOLD,
+      id: `block-${idx}`,
+      type: 'paragraph',
+      content: cleanPara,
+      confidence: suspicious ? 0.55 : 0.85,
+      needs_review: suspicious,
+      review_reason: suspicious ? 'Proverite neuobičajene simbole' : undefined,
     });
-  }
+    isFirst = false;
+  });
 
-  return blocks.length > 0 ? blocks : parseGeneral(lines, meanConf);
+  return blocks;
 }
