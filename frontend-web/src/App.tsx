@@ -5,8 +5,8 @@ import { ImageViewer } from './components/ImageViewer';
 import { DocumentEditor } from './components/DocumentEditor';
 import { Language, translations } from './i18n/translations';
 import { DocumentType, UniversalDocument, DocumentBlock } from './types';
-import { uploadAndAnalyze, getAnalysisResult, updateAnalysisBlocks } from './services/api';
-import { ArrowLeft, Loader2 } from 'lucide-react';
+import { uploadAndAnalyze, updateAnalysisBlocks } from './services/api';
+import { ArrowLeft } from 'lucide-react';
 
 export const App: React.FC = () => {
   const [lang, setLang] = useState<Language>('sr');
@@ -35,14 +35,13 @@ export const App: React.FC = () => {
     setErrorMessage(null);
 
     try {
-      const resp = await uploadAndAnalyze(
+      const result = await uploadAndAnalyze(
         selectedFile,
         'document.jpg',
         selectedDocType,
         lang === 'sr' ? 'sr-Latn' : 'en'
       );
 
-      const result = await getAnalysisResult(resp.analysis_id);
       setDocumentResult(result);
       setCurrentStep('result');
     } catch (err: any) {
@@ -145,7 +144,6 @@ export const App: React.FC = () => {
               </div>
             </div>
 
-            {/* Dvo-kolonski responsive prikaz: Desktop: Original | Digitalni dokument; Mobile: vertikalno */}
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
               {/* Leva kolona: Original slika */}
               <div className="lg:col-span-5 h-[450px] lg:h-[calc(100vh-210px)] lg:sticky lg:top-24">

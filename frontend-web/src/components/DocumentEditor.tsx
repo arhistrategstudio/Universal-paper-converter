@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { getExportUrl } from '../services/api';
 import { shareNativeDocument } from '../services/native';
+import { exportLocalDocument } from '../services/clientExporter';
 
 interface DocumentEditorProps {
   currentLang: Language;
@@ -92,6 +93,17 @@ export const DocumentEditor: React.FC<DocumentEditorProps> = ({
     await shareNativeDocument(title, `${title}\n\n${plainText}`);
   };
 
+  const handleExport = (format: 'txt' | 'csv' | 'pdf' | 'docx') => {
+    setExportOpen(false);
+    const backendUrl = getExportUrl(document.id, format);
+    if (backendUrl && backendUrl !== '#') {
+      window.open(backendUrl, '_blank');
+    } else {
+      // In-browser klijentski izvoz (radi uvek, uključujući GitHub Pages)
+      exportLocalDocument({ ...document, title, blocks }, format);
+    }
+  };
+
   return (
     <div className="flex flex-col h-full bg-white rounded-2xl border border-slate-200 shadow-md overflow-hidden">
       {/* Zaglavlje Editora */}
@@ -109,7 +121,7 @@ export const DocumentEditor: React.FC<DocumentEditorProps> = ({
         </div>
 
         <div className="flex items-center gap-1.5 sm:gap-2">
-          {/* Share dugme (nativni Android Share Sheet / Web Share) */}
+          {/* Share */}
           <button
             onClick={handleShare}
             title="Podeli dokument"
@@ -138,7 +150,7 @@ export const DocumentEditor: React.FC<DocumentEditorProps> = ({
             )}
           </button>
 
-          {/* Izvoz Dropdown */}
+          {/* Izvoz */}
           <div className="relative">
             <button
               onClick={() => setExportOpen(o => !o)}
@@ -150,42 +162,34 @@ export const DocumentEditor: React.FC<DocumentEditorProps> = ({
 
             {exportOpen && (
               <div className="absolute right-0 mt-2 w-48 bg-white rounded-xl shadow-xl border border-slate-100 py-1.5 z-30">
-                <a
-                  href={getExportUrl(document.id, 'pdf')}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="flex items-center gap-2 px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 hover:text-indigo-600 transition-colors"
+                <button
+                  onClick={() => handleExport('pdf')}
+                  className="w-full text-left flex items-center gap-2 px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 hover:text-indigo-600 transition-colors"
                 >
                   <FileText className="w-4 h-4 text-rose-500" />
                   {t.exportPDF}
-                </a>
-                <a
-                  href={getExportUrl(document.id, 'docx')}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="flex items-center gap-2 px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 hover:text-indigo-600 transition-colors"
+                </button>
+                <button
+                  onClick={() => handleExport('docx')}
+                  className="w-full text-left flex items-center gap-2 px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 hover:text-indigo-600 transition-colors"
                 >
                   <FileText className="w-4 h-4 text-blue-500" />
                   {t.exportDOCX}
-                </a>
-                <a
-                  href={getExportUrl(document.id, 'txt')}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="flex items-center gap-2 px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 hover:text-indigo-600 transition-colors"
+                </button>
+                <button
+                  onClick={() => handleExport('txt')}
+                  className="w-full text-left flex items-center gap-2 px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 hover:text-indigo-600 transition-colors"
                 >
                   <FileText className="w-4 h-4 text-slate-500" />
                   {t.exportTXT}
-                </a>
-                <a
-                  href={getExportUrl(document.id, 'csv')}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="flex items-center gap-2 px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 hover:text-indigo-600 transition-colors"
+                </button>
+                <button
+                  onClick={() => handleExport('csv')}
+                  className="w-full text-left flex items-center gap-2 px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 hover:text-indigo-600 transition-colors"
                 >
                   <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
                   {t.exportCSV}
-                </a>
+                </button>
               </div>
             )}
           </div>
@@ -208,7 +212,7 @@ export const DocumentEditor: React.FC<DocumentEditorProps> = ({
                   : 'bg-white border-slate-200 hover:border-slate-300'
               }`}
             >
-              {/* Oznaka "Proveri" za nesigurne delove */}
+              {/* Zastavica "Proveri" */}
               {block.needs_review && (
                 <div className="mb-2 flex items-center gap-1.5 text-xs font-bold text-amber-800 bg-amber-100/90 px-2.5 py-1 rounded-md w-fit">
                   <AlertCircle className="w-3.5 h-3.5 text-amber-600" />
@@ -219,7 +223,7 @@ export const DocumentEditor: React.FC<DocumentEditorProps> = ({
                 </div>
               )}
 
-              {/* Render po tipu bloka */}
+              {/* Render po tipu */}
               {block.type === 'title' ? (
                 <input
                   type="text"
@@ -332,8 +336,9 @@ export const DocumentEditor: React.FC<DocumentEditorProps> = ({
         </div>
 
         <div className="text-[11px] text-slate-400 flex items-center gap-3">
-          <span>{t.confidence} {Math.round(document.metadata.overall_confidence * 100)}%</span>
-          <span>{t.processingTime} {document.metadata.processing_time_ms}ms</span>
+          <span>{t.confidence} {Math.round((document.metadata?.overall_confidence || 0.8) * 100)}%</span>
+          <span>{t.processingTime} {document.metadata?.processing_time_ms || 0}ms</span>
+          <span className="text-indigo-600 font-medium">({document.metadata?.ocr_engine || 'OCR'})</span>
         </div>
       </div>
     </div>
