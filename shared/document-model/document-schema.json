@@ -1,0 +1,63 @@
+﻿{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "UniversalDocument",
+  "type": "object",
+  "required": ["id", "doc_type", "blocks", "metadata", "status"],
+  "properties": {
+    "id": { "type": "string" },
+    "title": { "type": "string" },
+    "doc_type": {
+      "type": "string",
+      "enum": ["document", "handwriting", "receipt", "form", "table", "auto"]
+    },
+    "language": { "type": "string" },
+    "status": {
+      "type": "string",
+      "enum": ["pending", "processing", "completed", "failed"]
+    },
+    "blocks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "type", "content"],
+        "properties": {
+          "id": { "type": "string" },
+          "type": {
+            "type": "string",
+            "enum": ["title", "heading", "paragraph", "list_item", "field", "table"]
+          },
+          "content": { "type": "string" },
+          "level": { "type": "integer" },
+          "key": { "type": "string" },
+          "value": { "type": "string" },
+          "headers": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+          "needs_review": { "type": "boolean" },
+          "review_reason": { "type": "string" }
+        }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "created_at": { "type": "string" },
+        "original_filename": { "type": "string" },
+        "image_width": { "type": "integer" },
+        "image_height": { "type": "integer" },
+        "ocr_engine": { "type": "string" },
+        "processing_time_ms": { "type": "number" },
+        "overall_confidence": { "type": "number" }
+      }
+    }
+  }
+}

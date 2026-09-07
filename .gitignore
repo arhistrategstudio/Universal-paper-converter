@@ -1,0 +1,32 @@
+﻿# Dependencies
+node_modules/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Environment
+.env
+.venv/
+env/
+venv/
+ENV/
+
+# Build outputs
+dist/
+dist-ssr/
+*.local
+build/
+
+# Android build outputs
+android/app/build/
+android/build/
+android/.gradle/
+android/local.properties
+android/app/release/
+
+# Temporary files
+*.tmp
+*.log
+test_sample_paper.jpg
+backend/app/tessdata/*.traineddata
